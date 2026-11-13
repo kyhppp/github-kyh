@@ -1,0 +1,6 @@
+onnxruntime-directml
+opencv-python
+numpy
+pillow
+gradio
+requests
