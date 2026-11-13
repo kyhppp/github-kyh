@@ -6,14 +6,37 @@
 
 | 파일 | 용도 |
 |---|---|
-| `실행.bat` | 이 컴퓨터에서만 쓰기. 브라우저에 화면이 열립니다 (http://127.0.0.1:7860). |
-| `공개링크로_실행.bat` | 다른 컴퓨터·휴대폰에서도 쓰기. `https://….trycloudflare.com` 공개 링크를 만들어 창에 보여 주고 클립보드에 복사합니다. |
+| `실행.bat` | 기본 실행. 브라우저에 화면이 열립니다 (http://127.0.0.1:7860). Tailscale을 설정해 두었다면 다른 기기용 고정 주소도 함께 보여 줍니다. |
+| `공개링크로_실행.bat` | Tailscale 없이 아무 기기에서나 쓰기. `https://….trycloudflare.com` 임시 공개 링크를 만들어 창에 보여 주고 클립보드에 복사합니다. |
 
 - 처음 실행하면 프로그램 환경(`.venv`)을 만들고 필요한 패키지를 설치합니다. Python 3.12가 필요합니다 (`winget install Python.Python.3.12`).
 - 각 기능을 처음 쓸 때 AI 모델을 내려받습니다 (모두 받으면 약 2GB, `models` 폴더).
 - 결과는 `결과` 폴더에 PNG로 저장됩니다.
 
-### 공개 링크 사용 시 알아 둘 점
+### 다른 기기에서 고정 주소로 쓰기 (Tailscale, 추천)
+
+[Tailscale](https://tailscale.com)을 쓰면 **주소가 바뀌지 않고**, 내 계정에 로그인한 기기에서만 열려서 비밀번호 없이도 안전합니다 (개인 사용 무료).
+
+**이 컴퓨터 (처음 한 번)**
+
+1. Tailscale 설치: `winget install Tailscale.Tailscale`
+2. 로그인: `tailscale up` → 나오는 링크를 브라우저에서 열어 로그인
+3. (선택) 알아보기 쉬운 이름: `tailscale set --hostname=photo-restorer`
+4. 복원기를 Tailscale 주소에 연결: `tailscale serve --bg --http=80 http://127.0.0.1:7860`
+   - 한 번 설정하면 컴퓨터를 재시작해도 유지됩니다. 끄려면 `tailscale serve --http=80 off`
+
+이후로는 `실행.bat`만 실행하면 창에 `http://photo-restorer.○○○.ts.net` 같은 다른 기기용 주소가 표시됩니다.
+
+**휴대폰·다른 컴퓨터 (기기마다 처음 한 번)**
+
+1. 앱스토어·Play 스토어 또는 https://tailscale.com/download 에서 Tailscale 설치
+2. 이 컴퓨터와 **같은 계정**으로 로그인하고 VPN 연결 허용
+3. 브라우저에서 위 주소 열기 (즐겨찾기·홈 화면에 추가해 두면 편해요)
+
+- 이 컴퓨터가 켜져 있고 `실행.bat`이 실행 중이어야 합니다.
+- 주소가 `http`라 브라우저가 "안전하지 않음"으로 표시할 수 있지만, Tailscale 연결 자체가 암호화되어 있습니다.
+
+### 임시 공개 링크 사용 시 알아 둘 점
 
 - 처음 한 번 [cloudflared](https://github.com/cloudflare/cloudflared)를 자동으로 설치합니다 (가입 불필요).
 - **비밀번호가 없습니다.** 링크를 아는 사람은 누구나 쓸 수 있으니 믿을 수 있는 사람에게만 보내세요.
