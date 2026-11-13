@@ -23,7 +23,7 @@ class Options:
     # 색 바램 보정
     auto_tone: bool = False
     # 업스케일
-    upscale: int = 2                   # 1, 2, 4
+    upscale: int = 0                   # 0 = 자동(필요한 만큼만), 1 = 안 함, 2, 4
     upscale_model: str = "nomos8k_sc_x4"  # "nomos8k_sc_x4"(디테일) | "real_esrgan"(매끈)
     # 얼굴
     face_restore: bool = True
@@ -221,35 +221,62 @@ def auto_tone(img: np.ndarray) -> np.ndarray:
 
 # ---------------------------------------------------------------- 업스케일
 
-def upscale(img: np.ndarray, factor: int, model: str = "nomos8k_sc_x4", gpu: bool = True,
+# 해상도 높이기 한도. 이미 큰 사진을 더 키우면 시간만 오래 걸리고 (25MP → 100MP에 몇 분)
+# 옛날 사진에는 그만큼의 디테일이 없어서 얻는 게 거의 없다.
+AUTO_TARGET = 4096  # 자동: 긴 변이 이 정도가 될 때까지만 키움
+MAX_SIDE = 8192     # 2배·4배를 골라도 긴 변이 이보다 커지지는 않게
+
+
+def upscale_factor(h: int, w: int, choice: int) -> float:
+    """실제로 키울 배율. 1.0이면 키우지 않는다."""
+    long_side = max(h, w)
+    f = min(4.0, AUTO_TARGET / long_side) if choice == 0 else min(float(choice), MAX_SIDE / long_side)
+    return f if f >= 1.25 else 1.0
+
+
+def upscale(img: np.ndarray, factor: float, model: str = "nomos8k_sc_x4", gpu: bool = True,
             progress=_noop) -> np.ndarray:
-    """factor배 확대. 4배 전용 모델로 2배를 만들 땐 4배로 키운 뒤 줄인다 (줄이면서 더 또렷해짐)."""
+    """factor배 확대 (소수 배율 가능). 모델 고유 배율로 키운 뒤 줄여서 맞춘다 (줄이면서 더 또렷해짐)."""
     if factor <= 1:
         return img
     if model == "real_esrgan":
-        return _sr(img, f"real_esrgan_x{factor}", factor, gpu, progress)
-    out = _sr(img, model, 4, gpu, progress)
-    if factor != 4:
-        out = cv2.resize(out, (img.shape[1] * factor, img.shape[0] * factor), interpolation=cv2.INTER_AREA)
-    return out
+        native = 2 if factor <= 2 else 4
+        return _sr(img, f"real_esrgan_x{native}", native, factor, gpu, progress)
+    return _sr(img, model, 4, factor, gpu, progress)
 
 
-def _sr(img: np.ndarray, mname: str, factor: int, gpu: bool = True, progress=_noop) -> np.ndarray:
+def _sr(img: np.ndarray, mname: str, native: int, factor: float, gpu: bool = True, progress=_noop) -> np.ndarray:
+    """타일로 나눠 모델 배율(native)로 키우고, 가로 한 줄씩 모아 최종 배율(factor)로 맞춘다.
+    (예전처럼 4배 전체 그림을 다 만든 뒤 줄이면 메모리를 수 GB씩 써서 느려진다)"""
     inp = input_info(mname, gpu, progress)[0]
     tile, pad = 256, 16
     h, w = img.shape[:2]
+    oh, ow = round(h * factor), round(w * factor)
     padded = cv2.copyMakeBorder(img, pad, pad + tile, pad, pad + tile, cv2.BORDER_REFLECT_101)
-    out = np.zeros((h * factor, w * factor, 3), dtype=np.uint8)
-    tiles = [(y, x) for y in range(0, h, tile) for x in range(0, w, tile)]
-    for i, (y, x) in enumerate(tiles):
-        progress(i / len(tiles), desc=f"해상도 높이는 중 ({i + 1}/{len(tiles)})")
-        crop = padded[y:y + tile + 2 * pad, x:x + tile + 2 * pad]
-        t = (crop[:, :, ::-1].astype(np.float32) / 255.0).transpose(2, 0, 1)[None]
-        r = run(mname, {inp.name: t}, gpu)[0][0]
-        r = (np.clip(r.transpose(1, 2, 0), 0, 1) * 255.0).round().astype(np.uint8)[:, :, ::-1]
-        r = r[pad * factor:(pad + tile) * factor, pad * factor:(pad + tile) * factor]
-        th, tw = min(tile, h - y), min(tile, w - x)
-        out[y * factor:(y + th) * factor, x * factor:(x + tw) * factor] = r[:th * factor, :tw * factor]
+    out = np.zeros((oh, ow, 3), dtype=np.uint8)
+    n = native
+    rows = list(range(0, h, tile))
+    cols = list(range(0, w, tile))
+    total, done = len(rows) * len(cols), 0
+    for y in rows:
+        th = min(tile, h - y)
+        strip = np.zeros((th * n, w * n, 3), dtype=np.uint8)
+        for x in cols:
+            progress(done / total, desc=f"해상도 높이는 중 ({done + 1}/{total})")
+            done += 1
+            crop = padded[y:y + tile + 2 * pad, x:x + tile + 2 * pad]
+            t = (crop[:, :, ::-1].astype(np.float32) / 255.0).transpose(2, 0, 1)[None]
+            r = run(mname, {inp.name: t}, gpu)[0][0]
+            r = (np.clip(r.transpose(1, 2, 0), 0, 1) * 255.0).round().astype(np.uint8)[:, :, ::-1]
+            r = r[pad * n:(pad + tile) * n, pad * n:(pad + tile) * n]
+            tw = min(tile, w - x)
+            strip[:, x * n:(x + tw) * n] = r[:th * n, :tw * n]
+        y0, y1 = round(y * factor), round((y + th) * factor)
+        if factor == n:
+            out[y0:y1] = strip
+        else:
+            interp = cv2.INTER_AREA if factor < n else cv2.INTER_CUBIC
+            out[y0:y1] = cv2.resize(strip, (ow, y1 - y0), interpolation=interp)
     return out
 
 
@@ -297,7 +324,7 @@ def restore_faces(img: np.ndarray, opt: Options, progress=_noop) -> np.ndarray:
     if not faces:
         return img
     names = [i.name for i in input_info(opt.face_model, opt.gpu, progress)]
-    out = img.astype(np.float32)
+    out = img.copy()
     h, w = img.shape[:2]
     base_mask = _face_mask()
     for i, lm in enumerate(faces):
@@ -328,10 +355,21 @@ def restore_faces(img: np.ndarray, opt: Options, progress=_noop) -> np.ndarray:
             fmask = cv2.resize(base_mask, (size, size), interpolation=cv2.INTER_LINEAR)
             M = M * (size / 512.0)
         IM = cv2.invertAffineTransform(M)
-        back = cv2.warpAffine(r, IM, (w, h), borderMode=cv2.BORDER_REPLICATE, flags=cv2.INTER_LINEAR)
-        mask = cv2.warpAffine(fmask, IM, (w, h))[:, :, None] * opt.face_strength
-        out = back.astype(np.float32) * mask + out * (1 - mask)
-    return np.clip(out, 0, 255).round().astype(np.uint8)
+        # 붙일 곳(얼굴 주변 사각형)만 계산한다. 큰 사진에서 얼굴마다 사진 전체를 다루면 매우 느림
+        S = r.shape[0]
+        corners = np.array([[0, 0, 1], [S, 0, 1], [0, S, 1], [S, S, 1]], np.float32) @ IM.T
+        x0, y0 = np.floor(corners.min(axis=0)).astype(int) - 2
+        x1, y1 = np.ceil(corners.max(axis=0)).astype(int) + 2
+        x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, w), min(y1, h)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        IMr = IM.copy()
+        IMr[:, 2] -= (x0, y0)
+        back = cv2.warpAffine(r, IMr, (x1 - x0, y1 - y0), borderMode=cv2.BORDER_REPLICATE, flags=cv2.INTER_LINEAR)
+        mask = cv2.warpAffine(fmask, IMr, (x1 - x0, y1 - y0))[:, :, None] * opt.face_strength
+        roi = out[y0:y1, x0:x1].astype(np.float32)
+        out[y0:y1, x0:x1] = np.clip(back.astype(np.float32) * mask + roi * (1 - mask), 0, 255).round()
+    return out
 
 
 # ---------------------------------------------------------------- 컬러화
@@ -374,8 +412,10 @@ def restore(img: np.ndarray, opt: Options, progress=_noop) -> np.ndarray:
 
     if opt.auto_tone:
         img = auto_tone(img)
-    if opt.upscale > 1:
-        img = upscale(img, opt.upscale, opt.upscale_model, opt.gpu, progress)
+    f = upscale_factor(img.shape[0], img.shape[1], opt.upscale)
+    opt.debug["upscale"] = f
+    if f > 1:
+        img = upscale(img, f, opt.upscale_model, opt.gpu, progress)
     if opt.face_restore:
         img = restore_faces(img, opt, progress)
     if opt.colorize:
