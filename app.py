@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import time
 import traceback
@@ -722,6 +723,7 @@ if __name__ == "__main__":
         auth = lambda _user, pw: secrets.compare_digest(pw, password)  # noqa: E731
         print(f"\n  접속 비밀번호: {password}   (아이디는 아무거나 입력)\n  바꾸려면 비밀번호.txt 를 고친 뒤 다시 실행하세요.\n")
     demo.queue(default_concurrency_limit=1).launch(
-        inbrowser=True, share=share, auth=auth,
+        inbrowser=not os.environ.get("NO_BROWSER"), share=share, auth=auth,
         auth_message="옛날 사진 복원기 — 아이디는 아무거나, 비밀번호를 입력하세요.",
-        css=CSS, theme=gr.themes.Soft())
+        css=CSS, theme=gr.themes.Soft(),
+        pwa=True)  # 컴퓨터·휴대폰에서 앱처럼 설치할 수 있게
