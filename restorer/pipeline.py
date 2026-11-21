@@ -76,7 +76,11 @@ def _extend_line(support: np.ndarray, p1, p2, gap: int):
     return walk(p1, -d), walk(p2, d)
 
 
-def detect_scratches(img: np.ndarray, sensitivity: float = 0.5, protect_faces: bool = True) -> np.ndarray:
+BUSY_DENSITY = 0.05  # 주변(41×scale 창)에서 후보가 이 비율보다 많으면 무늬로 봄
+
+
+def detect_scratches(img: np.ndarray, sensitivity: float = 0.5, protect_faces: bool = True,
+                     busy_density: float | None = BUSY_DENSITY) -> np.ndarray:
     """얇은 밝은/어두운 선(긁힘)과 작은 점(먼지)을 찾아 마스크(0/255)로 돌려준다."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
@@ -94,6 +98,13 @@ def detect_scratches(img: np.ndarray, sensitivity: float = 0.5, protect_faces: b
     floor = 18.0 + 30.0 * t                   # 최소 밝기 차이
     ratio = 3.0 + 5.0 * t                     # 주변 질감 대비 배수
     strong = np.abs(diff) > ratio * activity + 4
+    # 후보가 빽빽한 곳(나뭇잎·머리카락·잔무늬)은 긁힘이 아니라 원래 무늬 → 통째로 제외
+    # (진짜 긁힘·먼지는 드문드문 있음)
+    win = int(41 * scale) | 1
+    if busy_density is None:  # 무늬 제외 끔 (판단용)
+        busy = np.zeros((h, w), bool)
+    else:
+        busy = cv2.blur(((np.abs(diff) > floor) & strong).astype(np.float32), (win, win)) > busy_density
     mask = np.zeros((h, w), np.uint8)       # 점·짧은 선 (얼굴 안에서는 무시)
     line_mask = np.zeros((h, w), np.uint8)  # 길게 확인된 직선 긁힘 (얼굴 위도 지움)
     dust_max = int(12 * scale * scale)
@@ -117,7 +128,10 @@ def detect_scratches(img: np.ndarray, sensitivity: float = 0.5, protect_faces: b
         # 3) 모양 검사: 가늘고 긴 선(긁힘)이나 작은 점(먼지)만 남김
         n, labels, stats, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
         keep = np.zeros(n, dtype=bool)
+        busy_frac = np.bincount(labels.ravel(), weights=busy.ravel(), minlength=n) / np.maximum(stats[:, 4], 1)
         for i in range(1, n):
+            if busy_frac[i] > 0.5:
+                continue
             x, y, bw, bh, area = stats[i]
             if area <= dust_max:
                 peak = np.abs(diff[y:y + bh, x:x + bw][labels[y:y + bh, x:x + bw] == i]).max()
@@ -142,6 +156,8 @@ def detect_scratches(img: np.ndarray, sensitivity: float = 0.5, protect_faces: b
                 hit = (thin & loose_d).sum() / max(thin.sum(), 1)
                 need = hit_need
                 on_line = thin > 0
+                if busy[on_line].mean() > 0.5:
+                    continue  # 무늬 속의 선(우산살·난간 무늬 등)
                 if face_area[on_line].all():
                     # 얼굴 안에만 있는 선은 눈썹·주름보다 확실히 길고 끊김이 없어야 긁힘
                     if np.hypot(x2 - x1, y2 - y1) < 1.5 * float(face_eye[on_line].max()):
@@ -325,6 +341,9 @@ def restore_faces(img: np.ndarray, opt: Options, progress=_noop) -> np.ndarray:
         return img
     names = [i.name for i in input_info(opt.face_model, opt.gpu, progress)]
     out = img.copy()
+    # 복원 강도를 나중에 바로 바꿀 수 있게, 얼굴별 복원 조각(강도 1 기준 마스크)을 남겨 둔다
+    patches = []
+    opt.debug["face_layers"] = {"before": img, "patches": patches}
     h, w = img.shape[:2]
     base_mask = _face_mask()
     for i, lm in enumerate(faces):
@@ -366,7 +385,19 @@ def restore_faces(img: np.ndarray, opt: Options, progress=_noop) -> np.ndarray:
         IMr = IM.copy()
         IMr[:, 2] -= (x0, y0)
         back = cv2.warpAffine(r, IMr, (x1 - x0, y1 - y0), borderMode=cv2.BORDER_REPLICATE, flags=cv2.INTER_LINEAR)
-        mask = cv2.warpAffine(fmask, IMr, (x1 - x0, y1 - y0))[:, :, None] * opt.face_strength
+        mask1 = cv2.warpAffine(fmask, IMr, (x1 - x0, y1 - y0))[:, :, None]
+        patches.append((x0, y0, x1, y1, back, mask1.astype(np.float16)))
+        mask = mask1 * opt.face_strength
+        roi = out[y0:y1, x0:x1].astype(np.float32)
+        out[y0:y1, x0:x1] = np.clip(back.astype(np.float32) * mask + roi * (1 - mask), 0, 255).round()
+    return out
+
+
+def reblend_faces(layers: dict, strength: float) -> np.ndarray:
+    """restore_faces가 남긴 조각으로 복원 강도만 바꿔 다시 붙인다 (AI 재계산 없음, 1초 안쪽)."""
+    out = layers["before"].copy()
+    for x0, y0, x1, y1, back, mask1 in layers["patches"]:
+        mask = mask1.astype(np.float32) * strength
         roi = out[y0:y1, x0:x1].astype(np.float32)
         out[y0:y1, x0:x1] = np.clip(back.astype(np.float32) * mask + roi * (1 - mask), 0, 255).round()
     return out

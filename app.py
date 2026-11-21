@@ -129,10 +129,31 @@ def restore_one(ed, *args, progress=gr.Progress()):
     m = opt.debug.get("mask")
     if m is not None and m.any():
         info.append(f"긁힘·얼룩 {(m > 0).mean() * 100:.2f}% 메움")
+    layers = opt.debug.get("face_layers")
+    face_cache = None
+    if opt.face_restore and layers and layers["patches"]:
+        if opt.colorize:
+            info.append("얼굴 복원 강도를 바꾸려면 다시 [복원 시작]을 눌러 주세요 (컬러화를 켜면 바로 반영은 안 돼요).")
+        else:
+            face_cache = {"layers": layers, "before": before, "path": str(path)}
+            info.append("얼굴 '복원 강도'는 다시 복원하지 않아도 바로 바꿔 볼 수 있어요.")
     info.append(f"저장 위치: {path}")
     info.append("아래 '마무리'에서 색감을 다듬고 트리밍(자르기)할 수 있어요.")
     return ((bgr_to_rgb(before), bgr_to_rgb(out)), str(path), "\n".join(info), out, G.thumbnail(out),
-            str(path), gr.update(visible=True))
+            str(path), gr.update(visible=True), face_cache)
+
+
+def change_face_strength(cache, strength, info):
+    """복원이 끝난 뒤 얼굴 '복원 강도'만 바꾸면 AI 재계산 없이 다시 섞어서 같은 파일에 덮어쓴다."""
+    if not cache:
+        return (gr.skip(),) * 6
+    out = P.reblend_faces(cache["layers"], float(strength))
+    path = Path(cache["path"])
+    Image.fromarray(bgr_to_rgb(out)).save(path, compress_level=3)
+    lines = [ln for ln in (info or "").splitlines() if not ln.startswith("얼굴 복원 강도 →")]
+    lines.insert(1, f"얼굴 복원 강도 → {float(strength):.2f} 로 바꿔서 다시 저장함")
+    return ((bgr_to_rgb(cache["before"]), bgr_to_rgb(out)), str(path), "\n".join(lines), out, G.thumbnail(out),
+            gr.Tabs(selected="result"))
 
 
 # ------------------------------------------------------------------ 색감 보정
@@ -569,6 +590,7 @@ with gr.Blocks(title="옛날 사진 복원기") as demo:
                     info = gr.Textbox(label="결과 정보", lines=4)
                     file_out = gr.File(label="복원된 사진 내려받기 (PNG)", height=90)
                 restore_path = gr.State()
+                face_cache = gr.State()   # 얼굴 복원 강도를 바로 바꾸기 위한 조각
                 del_r_btn, del_r_row, del_r_yes = delete_controls("결과가 마음에 안 들면 삭제")
 
         # ---------------- 6~7. 마무리 (복원 후)
@@ -616,6 +638,7 @@ with gr.Blocks(title="옛날 사진 복원기") as demo:
         # 원본 사진을 지우거나 새 사진을 올리면, 이전 사진의 복원 결과·마무리 칸도 함께 비운다
         for ev in (editor.clear, editor.upload):
             ev(clear_restore_view, None, restore_view, show_progress="hidden") \
+                .then(lambda: None, None, face_cache, show_progress="hidden") \
                 .then(clear_finish_view, None, finish_view, show_progress="hidden")
         btn_grade_clear.click(clear_finish_view, None, finish_view, show_progress="hidden")
         grade_upload.clear(clear_finish_view, None, finish_view, show_progress="hidden")
@@ -623,15 +646,23 @@ with gr.Blocks(title="옛날 사진 복원기") as demo:
         btn_mask.click(preview_mask, [editor, opts[1]], [mask_view, mask_info]).success(**show(vtabs, "mask"))
         # 새로 복원하면 마무리 칸은 새 결과로 바뀌므로, 따로 불러온 사진·이전에 저장한 표시는 비운다
         btn_run.click(restore_one, [editor] + opts,
-                      [slider, file_out, info, grade_src, grade_small, restore_path, del_r_btn]) \
+                      [slider, file_out, info, grade_src, grade_small, restore_path, del_r_btn, face_cache]) \
             .success(**show(vtabs, "result")) \
             .then(lambda: (None, *clear_saved_finish()), None, [grade_upload] + saved_finish, show_progress="hidden") \
             .then(**preview_args)
         del_r_yes.click(delete_restore, restore_path,
                         [slider, file_out, info, grade_src, grade_small, grade_view, trim_view, restore_path,
                          del_r_btn, del_r_row]).then(**show(vtabs, "src")) \
+            .then(lambda: None, None, face_cache, show_progress="hidden") \
             .then(lambda: (None, *clear_saved_finish()), None, [grade_upload] + saved_finish, show_progress="hidden")
         del_g_yes.click(delete_grade, grade_path, [grade_file, grade_info, grade_path, del_g_btn, del_g_row])
+        # 얼굴 '복원 강도'(opts[8])는 복원 후에도 바로 반영 → 마무리 미리보기까지 갱신
+        for ev in (opts[8].release,):
+            ev(change_face_strength, [face_cache, opts[8], info],
+               [slider, file_out, info, grade_src, grade_small, vtabs], show_progress="minimal") \
+                .then(lambda: (None, *clear_saved_finish()), None, [grade_upload] + saved_finish,
+                      show_progress="hidden") \
+                .then(**preview_args)
         for c in finish_ctrls:
             c.input(trigger_mode="always_last", **preview_args)
         # 만지는 슬라이더에 맞춰 왼쪽 미리보기 탭도 바꿔 준다

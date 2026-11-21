@@ -43,12 +43,13 @@ def is_grayscale(img: np.ndarray) -> bool:
 def suggest_scratch(img: np.ndarray):
     small = _small(img, 1000)  # 판단용이라 작게 (큰 사진도 2초 안쪽)
     pct = float((P.detect_scratches(small, 0.4) > 0).mean() * 100)
+    raw = float((P.detect_scratches(small, 0.4, busy_density=None) > 0).mean() * 100)  # 무늬 제외 전
     if pct < 0.02:
         return dict(on=False, sensitivity=0.4, method="lama"), \
             f"긁힘·얼룩이 거의 안 보여서 자동 제거를 껐어요 (감지 {pct:.2f}%)."
-    if pct > 5.0:  # 이만큼 잡히면 긁힘이 아니라 옷감·배경 무늬를 잘못 잡은 것
+    if raw > 5.0:  # 무늬 제외 전에 이만큼 잡히면 옷감·나뭇잎 같은 무늬가 많은 사진
         return dict(on=False, sensitivity=0.4, method="lama"), \
-            (f"무늬가 많은 사진이라 자동 감지가 엉뚱한 곳까지 잡아요({pct:.0f}%). 자동 제거는 껐으니, "
+            ("무늬가 많은 사진이라 자동 감지가 엉뚱한 곳까지 잡을 수 있어요. 자동 제거는 껐으니, "
              "긁힌 곳이 있으면 브러시로 칠해 주세요.")
     if pct > 2.0:  # 꽤 많이 잡히면 일부는 실제 무늬일 가능성 → 감도를 낮춘다
         return dict(on=True, sensitivity=0.25, method="lama"), \
